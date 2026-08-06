@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Match Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="vendor/lucide.js"></script>
+    <script src="vendor/xlsx.full.min.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><i data-lucide="waves"></i></div>
+          <div>
+            <p class="eyebrow">VOICE MATCH STUDIO</p>
+            <h1>角色音色匹配工作台</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span class="status-dot"><span></span><b id="appStatus">本地工作区</b></span>
+          <button class="icon-button" id="resetApp" title="清空当前工作区" aria-label="清空当前工作区"><i data-lucide="rotate-ccw"></i></button>
+        </div>
+      </header>
+
+      <div class="workspace-grid">
+        <aside class="sidebar">
+          <div class="side-section">
+            <div class="section-heading">
+              <div><span class="section-kicker">01</span><h2>输入资源</h2></div>
+              <i data-lucide="folder-open"></i>
+            </div>
+            <label class="drop-zone compact" for="voiceFolderInput">
+              <i data-lucide="audio-lines"></i>
+              <strong>导入音色资源包</strong>
+              <span>完整资源包：manifest.json + WAV / MP3 / M4A / OGG / FLAC 音频文件</span>
+              <input id="voiceFolderInput" type="file" webkitdirectory directory multiple accept=".json,.wav,.mp3,.m4a,.ogg,.flac,.aac" />
+            </label>
+            <div class="imported-file" id="voiceImportStatus"><span class="status-dot"><span></span>等待导入音色资源</span></div>
+          </div>
+
+          <div class="side-section">
+            <div class="section-heading">
+              <div><span class="section-kicker">02</span><h2>角色表格</h2></div>
+              <i data-lucide="table-2"></i>
+            </div>
+            <label class="drop-zone compact" for="roleFileInput">
+              <i data-lucide="file-spreadsheet"></i>
+              <strong>导入角色 XLSX</strong>
+              <span>自动识别昵称、简介、设定和开场白</span>
+              <input id="roleFileInput" type="file" accept=".xlsx,.xls,.csv" />
+            </label>
+            <div class="imported-file" id="roleImportStatus"><span class="status-dot"><span></span>等待导入角色表</span></div>
+          </div>
+
+          <div class="side-section resource-summary">
+            <div class="section-heading">
+              <div><span class="section-kicker">03</span><h2>资源概览</h2></div>
+              <i data-lucide="scan-line"></i>
+            </div>
+            <div class="mini-stats">
+              <div><strong id="femaleCount">0</strong><span>女声 · 成熟</span></div>
+              <div><strong id="maleCount">0</strong><span>男声 · 成熟</span></div>
+              <div><strong id="femaleYoungCount">0</strong><span>女声 · 幼态/年轻</span></div>
+              <div><strong id="maleYoungCount">0</strong><span>男声 · 幼态/年轻</span></div>
+            </div>
+            <p class="muted-note">导入角色表时可选择偏成熟或偏幼态匹配；资源库可随时试听复核。</p>
+          </div>
+
+          <div class="side-section">
+            <div class="section-heading">
+              <div><span class="section-kicker">04</span><h2>添加自定义音色</h2></div>
+              <i data-lucide="file-plus-2"></i>
+            </div>
+            <label class="drop-zone compact custom-drop-zone" for="customVoiceInput">
+              <i data-lucide="mic-2"></i>
+              <strong>只有音频也可以添加</strong>
+              <span>直接选择 WAV / MP3 等音频；上传后填写或确认中文名称、英文 voiceId、性别和成熟度</span>
+              <input id="customVoiceInput" type="file" multiple accept=".wav,.mp3,.m4a,.ogg,.flac,.aac" />
+            </label>
+            <div class="imported-file" id="customVoiceStatus"><span class="status-dot"><span></span>尚未添加自定义音色</span></div>
+          </div>
+
+          <div class="sidebar-footer">
+            <i data-lucide="shield-check"></i>
+            <span>文件只在浏览器本地处理，不会自动上传。</span>
+          </div>
+        </aside>
+
+        <main class="main-content">
+          <div class="main-topline">
+            <nav class="view-tabs" aria-label="工作区视图">
+              <button class="view-tab active" data-view="match"><i data-lucide="sparkles"></i>角色匹配</button>
+              <button class="view-tab" data-view="library"><i data-lucide="library"></i>音色资源库</button>
+              <button class="view-tab" data-view="export"><i data-lucide="download"></i>导出结果</button>
+            </nav>
+            <div class="match-toolbar" id="topMatchToolbar">
+              <div class="match-toolbar-copy"><span class="eyebrow">ROLE MATCHING</span><p>导入角色表后，选择角色即可试听推荐音色、调整匹配并导出 voiceId。</p><span class="toolbar-guide"><i data-lucide="circle-help"></i>首次使用：导入资源包 → 角色表 → 试听匹配</span><button class="quiet-button guide-test-button" id="loadTestDataButtonTop" title="载入内置示例角色"><i data-lucide="flask-conical"></i>测试集</button></div>
+              <div class="heading-metric"><strong id="roleCount">0</strong><span>导入角色</span></div>
+            </div>
+          </div>
+
+          <section class="view-panel active" id="view-match">
+            <div class="match-layout">
+              <section class="role-panel panel">
+                <div class="panel-header"><div><span class="panel-label">角色队列</span><h3 id="roleQueueTitle">请先导入角色表</h3></div><div class="panel-header-actions"><button class="quiet-button" id="matchConfigButton" title="修改成熟度和匹配范围"><i data-lucide="sliders-horizontal"></i>匹配设置</button><button class="quiet-button" id="matchAllButton" title="为所有角色重新生成候选"><i data-lucide="wand-sparkles"></i>重新匹配</button></div></div>
+                <div class="role-list" id="roleList"><div class="empty-state"><i data-lucide="file-up"></i><strong>等待角色表</strong><span>从左侧导入 XLSX 后，这里会出现角色队列。</span><button class="quiet-button test-data-button" id="loadTestDataButton"><i data-lucide="flask-conical"></i>载入测试集</button></div></div>
+              </section>
+              <section class="detail-panel panel" id="roleDetailPanel">
+                <div class="empty-state tall"><i data-lucide="audio-waveform"></i><strong>选择一个角色开始</strong><span>先导入角色表，再从队列选择角色。</span></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view-panel" id="view-library">
+            <div class="page-heading compact-heading">
+              <div><p class="eyebrow">VOICE LIBRARY</p><h2>音色资源库</h2><p class="page-lede">幼态和年轻声线默认从匹配候选中排除；你可以在这里复核、试听或调整资源标签。</p></div>
+            </div>
+            <div class="library-toolbar panel">
+              <div class="segmented" id="genderFilter"><button class="selected" data-value="all">全部</button><button data-value="female">女声</button><button data-value="male">男声</button></div>
+              <div class="segmented" id="maturityFilter"><button class="selected" data-value="mature">成熟候选</button><button data-value="young">幼态/年轻</button><button data-value="all">全部</button></div>
+              <label class="search-box"><i data-lucide="search"></i><input id="voiceSearch" placeholder="搜索名称或 voiceId" /><kbd>/</kbd></label>
+            </div>
+            <div class="voice-grid" id="voiceGrid"><div class="empty-state wide"><i data-lucide="library-big"></i><strong>等待音色资源包</strong><span>导入包含音频和 manifest.json 的目录后，资源会显示在这里。</span></div></div>
+          </section>
+
+          <section class="view-panel" id="view-export">
+            <div class="page-heading compact-heading"><div><p class="eyebrow">EXPORT</p><h2>导出匹配结果</h2><p class="page-lede">确认角色与 voiceId 后，导出一份不嵌入音频、只写入匹配结果的 XLSX。</p></div></div>
+            <div class="export-panel panel">
+              <div class="export-summary"><div class="export-icon"><i data-lucide="file-output"></i></div><div><span class="panel-label">当前导出</span><h3 id="exportTitle">尚未导入角色表</h3><p id="exportMeta">匹配完成后会生成下载文件。</p></div></div>
+              <button class="primary-button" id="exportButton" disabled><i data-lucide="download"></i>导出带 voiceId 的 XLSX</button>
+            </div>
+            <div class="export-table panel"><div class="panel-header"><div><span class="panel-label">导出预览</span><h3>匹配清单</h3></div><span class="table-status" id="exportStatus">0 / 0 已匹配</span></div><div id="exportPreview"><div class="empty-state"><i data-lucide="list-checks"></i><strong>暂无匹配结果</strong><span>导入角色表后完成匹配，这里会显示导出预览。</span></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <dialog id="customVoiceDialog" class="custom-dialog">
+      <form method="dialog" id="customVoiceForm">
+        <div class="custom-dialog-header"><div><span class="panel-label">CUSTOM VOICE</span><h2>确认自定义音色</h2><p>名称默认尽量使用中文；voiceId 默认自动生成英文值。最终匹配和导出以你确认的 voiceId 为准。</p></div><button class="icon-button" value="cancel" title="取消" aria-label="取消"><i data-lucide="x"></i></button></div>
+        <div class="custom-voice-rows" id="customVoiceRows"></div>
+        <div class="custom-dialog-actions"><button class="quiet-button" value="cancel">取消</button><button class="primary-button" id="confirmCustomVoices" value="default"><i data-lucide="check"></i>加入资源库</button></div>
+      </form>
+    </dialog>
+    <dialog id="matchConfigDialog" class="custom-dialog match-config-dialog">
+      <form method="dialog" id="matchConfigForm">
+        <div class="custom-dialog-header"><div><span class="panel-label">MATCH SETTINGS</span><h2>选择匹配类型</h2><p>角色表已读取。请先选择自动匹配使用的声线范围，之后仍可在角色详情中试听和手动替换。</p></div><button class="icon-button" value="cancel" title="取消导入" aria-label="取消导入"><i data-lucide="x"></i></button></div>
+        <div class="match-config-fields">
+          <label>默认声线年龄<select id="matchMaturitySelect"><option value="mature" selected>偏成熟（默认）</option><option value="young">偏幼态 / 年轻</option></select><small>决定自动推荐优先使用哪一类音色。</small></label>
+          <label>匹配范围<select id="matchStrategySelect"><option value="best" selected>按对应性别 + 所选类型，选择最匹配</option><option value="mature">只在成熟音色中选择</option><option value="young">只在幼态 / 年轻音色中选择</option></select><small>选择“只在成熟/幼态”时，会覆盖上面的默认声线年龄。</small></label>
+        </div>
+        <div class="custom-dialog-actions"><button class="quiet-button" value="cancel">取消导入</button><button class="primary-button" id="confirmMatchConfig" value="default"><i data-lucide="wand-sparkles"></i>开始匹配</button></div>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
