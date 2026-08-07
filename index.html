@@ -147,7 +147,7 @@
       <form method="dialog" id="matchConfigForm">
         <div class="custom-dialog-header"><div><span class="panel-label">MATCH SETTINGS</span><h2>选择匹配类型</h2><p>角色表已读取。请先选择自动匹配使用的声线范围，之后仍可在角色详情中试听和手动替换。</p></div><button class="icon-button" value="cancel" title="取消导入" aria-label="取消导入"><i data-lucide="x"></i></button></div>
         <div class="match-config-fields">
-          <label>默认声线年龄<select id="matchMaturitySelect"><option value="mature" selected>偏成熟（默认）</option><option value="young">偏幼态 / 年轻</option></select><small>决定自动推荐优先使用哪一类音色。</small></label>
+          <label>默认声线年龄<select id="matchMaturitySelect"><option value="mature" selected>偏成熟（默认）</option><option value="young">偏幼态 / 年轻</option><option value="best">按人设最佳匹配</option></select><small>按人设最佳匹配会结合简介、设定和开场白，在成熟与幼态音色中综合选择。</small></label>
           <label>匹配范围<select id="matchStrategySelect"><option value="best" selected>按对应性别 + 所选类型，选择最匹配</option><option value="mature">只在成熟音色中选择</option><option value="young">只在幼态 / 年轻音色中选择</option></select><small>选择“只在成熟/幼态”时，会覆盖上面的默认声线年龄。</small></label>
         </div>
         <div class="custom-dialog-actions"><button class="quiet-button" value="cancel">取消导入</button><button class="primary-button" id="confirmMatchConfig" value="default"><i data-lucide="wand-sparkles"></i>开始匹配</button></div>

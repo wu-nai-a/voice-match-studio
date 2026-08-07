@@ -175,6 +175,7 @@ h3 { margin: 4px 0 0; font-size: 15px; }
 .mini-voice strong { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .mini-voice code { display: block; overflow: hidden; margin-top: 5px; text-overflow: ellipsis; white-space: nowrap; }
 .mini-voice p { overflow: hidden; margin: 5px 0 7px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.acoustic-summary { display: block; overflow: hidden; margin: 5px 0 7px; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .mini-voice-actions { display: flex; gap: 5px; }
 .mini-voice-actions .mini-icon { width: 27px; height: 27px; }
 .mini-voice-actions .assign-button { height: 27px; padding: 0 8px; font-size: 10px; }
@@ -199,6 +200,9 @@ h3 { margin: 4px 0 0; font-size: 15px; }
 .tag.young { color: #8c642a; background: var(--gold-soft); }
 .tag.gender { color: #80524a; background: var(--coral-soft); }
 .tag.custom { color: #6650a3; background: #eee9fb; }
+.tag.acoustic { color: #2e6b78; background: #e5f3f5; }
+.tag.acoustic.pending { color: #887148; background: #f4efdf; }
+.tag.acoustic.failed { color: #9a4f4a; background: #f9e9e7; }
 .voice-card-tags, .mini-voice-tags { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .custom-voice-card { border-color: #c9b9ec; }
 .voice-card .audio-row { justify-content: space-between; gap: 8px; margin-top: 14px; }

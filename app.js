@@ -8,6 +8,8 @@ const state = {
   customDraftFiles: [],
   matchConfig: { maturity: 'mature', strategy: 'best' },
   pendingRoleImport: null,
+  previewAudio: null,
+  acousticRun: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -97,8 +99,175 @@ function normalizeVoice(raw, audioUrl) {
     origin: raw.origin || 'package',
     audioUrl: audioUrl || '',
     profile: raw.profile || { authority: .5, warmth: .5, intimacy: .5, energy: .5, restraint: .5, brightness: .5 },
+    acousticProfile: raw.acousticProfile || null,
+    acousticFeatures: raw.acousticFeatures || null,
+    analysisStatus: raw.acousticProfile ? 'ready' : (audioUrl ? 'pending' : 'unavailable'),
     description: raw.description || '',
   };
+}
+
+const ACOUSTIC_KEYS = ['authority', 'warmth', 'intimacy', 'energy', 'restraint', 'brightness'];
+const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
+const mean = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+
+function acousticProfileFromFeatures(features) {
+  const pitch = clamp01((features.pitchHz - 85) / 190);
+  const bright = clamp01((features.spectralCentroidHz - 700) / 3000);
+  const dynamics = clamp01(features.energyVariation * 4.5);
+  const activity = clamp01(features.activityRatio);
+  return {
+    authority: clamp01(.68 - pitch * .18 + (1 - bright) * .12),
+    warmth: clamp01(.42 + (1 - bright) * .26 + (1 - dynamics) * .12),
+    intimacy: clamp01(.42 + (1 - dynamics) * .18 + (1 - activity) * .1),
+    energy: clamp01(.22 + pitch * .2 + dynamics * .42 + activity * .18),
+    restraint: clamp01(.76 - dynamics * .42 - activity * .1),
+    brightness: clamp01(bright * .82 + pitch * .18),
+  };
+}
+
+function monoSamples(buffer, maxRate = 16000, maxSeconds = 18) {
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+  const stride = Math.max(1, Math.floor(buffer.sampleRate / maxRate));
+  const limit = Math.min(buffer.length, Math.floor(buffer.sampleRate * maxSeconds));
+  const output = new Float32Array(Math.ceil(limit / stride));
+  for (let source = 0, target = 0; source < limit; source += stride, target += 1) {
+    let sample = 0;
+    channels.forEach((channel) => { sample += channel[source] || 0; });
+    output[target] = sample / Math.max(1, channels.length);
+  }
+  return { samples: output, sampleRate: buffer.sampleRate / stride };
+}
+
+function extractAcousticFeatures(buffer) {
+  const { samples, sampleRate } = monoSamples(buffer);
+  const frameSize = 1024;
+  const hop = 512;
+  const frames = [];
+  for (let start = 0; start + frameSize < samples.length; start += hop) {
+    let energy = 0;
+    let crossings = 0;
+    for (let index = 0; index < frameSize; index += 1) {
+      const value = samples[start + index];
+      energy += value * value;
+      if (index && ((value >= 0) !== (samples[start + index - 1] >= 0))) crossings += 1;
+    }
+    frames.push({ start, rms: Math.sqrt(energy / frameSize), zcr: crossings / frameSize });
+  }
+  const peak = Math.max(...frames.map((frame) => frame.rms), 0.00001);
+  const active = frames.filter((frame) => frame.rms > peak * .16);
+  const selected = active.filter((_, index) => index % Math.max(1, Math.ceil(active.length / 6)) === 0).slice(0, 6);
+  const pitches = [];
+  const centroids = [];
+  selected.forEach((frame) => {
+    const data = samples.subarray(frame.start, frame.start + frameSize);
+    let bestLag = 0;
+    let bestCorrelation = 0;
+    const minLag = Math.floor(sampleRate / 360);
+    const maxLag = Math.min(Math.floor(sampleRate / 65), data.length - 2);
+    for (let lag = minLag; lag <= maxLag; lag += 1) {
+      let correlation = 0;
+      let energyA = 0;
+      let energyB = 0;
+      for (let index = 0; index < data.length - lag; index += 1) {
+        const a = data[index];
+        const b = data[index + lag];
+        correlation += a * b;
+        energyA += a * a;
+        energyB += b * b;
+      }
+      const normalized = correlation / Math.sqrt((energyA * energyB) || 1);
+      if (normalized > bestCorrelation) { bestCorrelation = normalized; bestLag = lag; }
+    }
+    if (bestLag && bestCorrelation > .28) pitches.push(sampleRate / bestLag);
+
+    let weightedFrequency = 0;
+    let magnitudeTotal = 0;
+    const bins = 128;
+    const half = Math.min(data.length, 512);
+    for (let bin = 1; bin <= bins; bin += 1) {
+      const frequency = (bin * sampleRate) / (bins * 2);
+      let real = 0;
+      let imaginary = 0;
+      for (let index = 0; index < half; index += 1) {
+        const window = .5 - .5 * Math.cos((2 * Math.PI * index) / Math.max(1, half - 1));
+        const angle = (2 * Math.PI * bin * index) / Math.max(1, half);
+        real += data[index] * window * Math.cos(angle);
+        imaginary -= data[index] * window * Math.sin(angle);
+      }
+      const magnitude = Math.sqrt(real * real + imaginary * imaginary);
+      weightedFrequency += frequency * magnitude;
+      magnitudeTotal += magnitude;
+    }
+    if (magnitudeTotal) centroids.push(weightedFrequency / magnitudeTotal);
+  });
+  const rmsValues = frames.map((frame) => frame.rms).filter(Boolean);
+  const averageRms = mean(rmsValues);
+  const energyVariation = averageRms ? Math.sqrt(mean(rmsValues.map((value) => (value - averageRms) ** 2))) / averageRms : 0;
+  const features = {
+    durationSeconds: Number(buffer.duration.toFixed(2)),
+    pitchHz: Number((mean(pitches) || 0).toFixed(1)),
+    spectralCentroidHz: Number(mean(centroids).toFixed(1)),
+    energyVariation: Number(energyVariation.toFixed(3)),
+    activityRatio: Number((frames.length ? active.length / frames.length : 0).toFixed(3)),
+    zeroCrossingRate: Number((mean(frames.map((frame) => frame.zcr))).toFixed(4)),
+  };
+  return { features, profile: acousticProfileFromFeatures(features) };
+}
+
+async function analyzeVoice(voice, context) {
+  if (!voice.audioUrl || voice.acousticProfile) return;
+  voice.analysisStatus = 'analyzing';
+  try {
+    const response = await fetch(voice.audioUrl);
+    if (!response.ok) throw new Error(`音频读取失败: ${response.status}`);
+    const buffer = await context.decodeAudioData(await response.arrayBuffer());
+    const result = extractAcousticFeatures(buffer);
+    voice.acousticFeatures = result.features;
+    voice.acousticProfile = result.profile;
+    voice.analysisStatus = 'ready';
+  } catch (error) {
+    voice.analysisStatus = 'failed';
+    console.warn('声学分析失败', voice.voiceId, error);
+  }
+}
+
+function queueAcousticAnalysis() {
+  const run = ++state.acousticRun;
+  const pending = state.voices.filter((voice) => voice.audioUrl && !voice.acousticProfile && voice.analysisStatus !== 'failed');
+  if (!pending.length) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    pending.forEach((voice) => { voice.analysisStatus = 'failed'; });
+    renderAll();
+    return;
+  }
+  const context = new AudioContextClass();
+  (async () => {
+    for (const voice of pending) {
+      if (run !== state.acousticRun) break;
+      await analyzeVoice(voice, context);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+    await context.close();
+    if (run !== state.acousticRun) return;
+    if (state.roles.length) { autoMatchAll(false); }
+    renderAll();
+  })();
+}
+
+function acousticTag(voice) {
+  if (voice.analysisStatus === 'analyzing') return '<span class="tag acoustic pending">分析中</span>';
+  if (voice.acousticProfile) return '<span class="tag acoustic">声学已分析</span>';
+  if (voice.analysisStatus === 'failed') return '<span class="tag acoustic failed">分析不可用</span>';
+  return '<span class="tag acoustic pending">待分析</span>';
+}
+
+function acousticSummary(voice) {
+  const features = voice.acousticFeatures;
+  if (!features) return '声学特征尚未完成分析';
+  const pitch = features.pitchHz ? `音高 ${Math.round(features.pitchHz)}Hz` : '音高未检出';
+  const brightness = features.spectralCentroidHz ? `明亮度 ${Math.round(features.spectralCentroidHz)}Hz` : '明亮度未检出';
+  return `${pitch} · ${brightness}`;
 }
 
 function replaceVoices(voices, sourceLabel) {
@@ -111,6 +280,7 @@ function replaceVoices(voices, sourceLabel) {
   state.voices = [...voices, ...preservedCustom];
   setImportStatus(els.voiceImportStatus, `${sourceLabel} · ${state.voices.length} 条音色`, true);
   renderAll();
+  queueAcousticAnalysis();
 }
 
 async function loadDemoManifest() {
@@ -215,6 +385,7 @@ function addCustomVoices(event) {
   setImportStatus(els.customVoiceStatus, `当前工作区已添加 ${customCount} 条自定义音色`, true);
   closeCustomVoiceDialog();
   renderAll();
+  queueAcousticAnalysis();
   showToast(`已加入 ${entries.length} 条自定义音色；新资源已置顶显示`);
 }
 
@@ -407,7 +578,10 @@ function scoreVoice(role, voice) {
   const profile = voice.profile;
   const weights = { authority: 1.3, warmth: 1.12, intimacy: 1, energy: .78, restraint: 1.18, brightness: .82 };
   const totalWeight = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
-  const featureFit = 1 - Object.entries(weights).reduce((sum, [key, weight]) => sum + Math.abs((target[key] ?? .5) - (profile[key] ?? .5)) * weight, 0) / totalWeight;
+  const fitFor = (candidate) => 1 - Object.entries(weights).reduce((sum, [key, weight]) => sum + Math.abs((target[key] ?? .5) - (candidate[key] ?? .5)) * weight, 0) / totalWeight;
+  const metadataFit = fitFor(profile);
+  const acousticFit = voice.acousticProfile ? fitFor(voice.acousticProfile) : metadataFit;
+  const featureFit = metadataFit * .7 + acousticFit * .3;
   const text = `${role.name} ${role.intro} ${role.setting} ${role.opening}`;
   const labelFit = STYLE_DEFINITIONS.reduce((sum, style) => sum + (countHits(text, style.words) ? Math.min(2, voiceStyleHits(voice, style.key)) : 0), 0);
   // The visible score is a calibrated suitability index for ranking a finite voice pool, not a probability claim.
@@ -418,13 +592,22 @@ function effectiveMaturity() {
   if (state.matchConfig.strategy === 'mature' || state.matchConfig.strategy === 'young') return state.matchConfig.strategy;
   return state.matchConfig.maturity;
 }
-function effectiveMaturityLabel() { return effectiveMaturity() === 'young' ? '偏幼态/年轻' : '偏成熟'; }
+function effectiveMaturityLabel() {
+  const maturity = effectiveMaturity();
+  if (maturity === 'young') return '偏幼态/年轻';
+  if (maturity === 'best') return '按人设最佳匹配';
+  return '偏成熟';
+}
+
+function maturityMatchesConfig(voice) {
+  const maturity = effectiveMaturity();
+  return maturity === 'best' || voice.maturity === maturity;
+}
 
 function candidatesFor(role) {
   if (!['female', 'male'].includes(role.gender)) return [];
-  const maturity = effectiveMaturity();
   const candidates = state.voices
-    .filter((voice) => voice.gender === role.gender && voice.maturity === maturity && !voice.custom)
+    .filter((voice) => voice.gender === role.gender && maturityMatchesConfig(voice) && !voice.custom)
     .map((voice) => ({ voiceId: voice.voiceId, score: scoreVoice(role, voice) }))
     .sort((a, b) => b.score - a.score);
   return candidates;
@@ -442,10 +625,10 @@ function autoMatchAll(force = false) {
       role.match = null;
       return;
     }
-    const eligible = state.voices.filter((voice) => voice.gender === role.gender && voice.maturity === effectiveMaturity() && !voice.custom).length;
+    const eligible = state.voices.filter((voice) => voice.gender === role.gender && maturityMatchesConfig(voice) && !voice.custom).length;
     const perVoiceLimit = Math.max(1, Math.ceil((roleCounts[role.gender] || 1) / Math.max(1, eligible)) + 1);
     const existingVoice = getVoice(role.match);
-    if (!force && role.manualOverride && existingVoice?.gender === role.gender && existingVoice?.maturity === effectiveMaturity()) {
+    if (!force && role.manualOverride && existingVoice?.gender === role.gender && maturityMatchesConfig(existingVoice)) {
       usage.set(role.match, (usage.get(role.match) || 0) + 1);
       return;
     }
@@ -489,6 +672,19 @@ function audioButton(voice) {
   return voice?.audioUrl ? `<audio controls preload="none" src="${voice.audioUrl}"></audio>` : `<span class="audio-missing">${icon('volume-x')} 未找到音频文件</span>`;
 }
 
+function playVoice(voice) {
+  if (!voice?.audioUrl) return showToast('该音色未绑定音频文件');
+  if (state.previewAudio) {
+    state.previewAudio.pause();
+    state.previewAudio.currentTime = 0;
+  }
+  state.previewAudio = new Audio(voice.audioUrl);
+  state.previewAudio.addEventListener('ended', () => {
+    if (state.previewAudio?.src === voice.audioUrl) state.previewAudio = null;
+  }, { once: true });
+  state.previewAudio.play().catch(() => showToast('浏览器阻止了自动播放，请再次点击试听'));
+}
+
 function renderRoleDetail() {
   const role = selectedRole();
   if (!role) return;
@@ -504,15 +700,14 @@ function renderRoleDetail() {
     <nav class="detail-action-nav" aria-label="音色操作"><button data-scroll-target="recommended-voices">推荐音色</button><button data-scroll-target="manual-voices">手动调整音色</button></nav>
     <details class="role-source-content"><summary>角色文本内容 <span>简介 · 设定 · 开场白</span></summary><div class="text-block"><h4>角色简介</h4><p>${role.intro || '未读取到角色简介'}</p></div><div class="text-block"><h4>角色设定</h4><p>${role.setting || '未读取到角色设定'}</p></div><div class="text-block"><h4>开场白</h4><p>${role.opening || '未读取到开场白'}</p></div></details>
     <section class="candidate-section" id="recommended-voices"><header><h3>推荐音色</h3><span>适配指数基于角色风格和资源库内相对排序</span></header><div class="candidate-list">
-      ${candidates.length ? candidates.map(({ voice, score }) => `<article class="candidate-card ${voice.voiceId === role.match ? 'selected' : ''}"><div class="score-mark">${score}</div><div class="candidate-info"><div class="candidate-head"><strong>${voiceLabel(voice)}</strong><code>${voice.voiceId}</code><span class="tag ${voice.maturity}">${maturityText(voice)}</span></div><p>${matchRationale(role, voice)} · ${voice.description || '声线特征待补充'}</p></div><div class="candidate-actions"><button class="mini-icon" title="试听 ${voiceLabel(voice)}" data-play="${voice.voiceId}">${icon('play')}</button><button class="assign-button" data-assign="${voice.voiceId}">${voice.voiceId === role.match ? '已匹配' : '使用此音色'}</button></div></article>`).join('') : `<div class="empty-state"><strong>没有可用的${effectiveMaturityLabel()}候选</strong><span>请确认资源包中有对应性别的${effectiveMaturityLabel()}音色，或切换匹配类型。</span></div>`}
+      ${candidates.length ? candidates.map(({ voice, score }) => `<article class="candidate-card ${voice.voiceId === role.match ? 'selected' : ''}"><div class="score-mark">${score}</div><div class="candidate-info"><div class="candidate-head"><strong>${voiceLabel(voice)}</strong><code>${voice.voiceId}</code><span class="tag ${voice.maturity}">${maturityText(voice)}</span>${acousticTag(voice)}</div><p>${matchRationale(role, voice)} · ${voice.description || '声线特征待补充'}</p><small class="acoustic-summary">${acousticSummary(voice)}</small></div><div class="candidate-actions"><button class="mini-icon" title="试听 ${voiceLabel(voice)}" data-play="${voice.voiceId}">${icon('play')}</button><button class="assign-button" data-assign="${voice.voiceId}">${voice.voiceId === role.match ? '已匹配' : '使用此音色'}</button></div></article>`).join('') : `<div class="empty-state"><strong>没有可用的${effectiveMaturityLabel()}候选</strong><span>请确认资源包中有对应性别的${effectiveMaturityLabel()}音色，或切换匹配类型。</span></div>`}
     </div></section>
-    <section class="manual-section" id="manual-voices"><header><h3>手动调整音色</h3><span>${genderLabel} · 自定义音色优先 · 包含偏成熟与偏幼态/年轻</span></header><div class="manual-picker">${manualVoices.length ? manualVoices.map((voice) => `<article class="mini-voice ${voice.voiceId === role.match ? 'selected' : ''} ${voice.custom ? 'custom-voice-card' : ''}"><div class="mini-voice-title"><strong>${voiceLabel(voice)}</strong><div class="mini-voice-tags">${voice.custom ? '<span class="tag custom">自定义</span>' : ''}<span class="tag ${voice.maturity}">${maturityText(voice)}</span></div></div><code>${voice.voiceId}</code><p>${voice.description || '声线特征待补充'}</p><div class="mini-voice-actions"><button class="mini-icon" title="试听 ${voiceLabel(voice)}" data-play="${voice.voiceId}">${icon('play')}</button><button class="assign-button" data-assign="${voice.voiceId}">${voice.voiceId === role.match ? '已匹配' : '匹配'}</button></div></article>`).join('') : '<p class="manual-empty">请先选择角色性别，查看可手动分配的音色。</p>'}</div></section>
+    <section class="manual-section" id="manual-voices"><header><h3>手动调整音色</h3><span>${genderLabel} · 自定义音色优先 · 包含偏成熟与偏幼态/年轻</span></header><div class="manual-picker">${manualVoices.length ? manualVoices.map((voice) => `<article class="mini-voice ${voice.voiceId === role.match ? 'selected' : ''} ${voice.custom ? 'custom-voice-card' : ''}"><div class="mini-voice-title"><strong>${voiceLabel(voice)}</strong><div class="mini-voice-tags">${voice.custom ? '<span class="tag custom">自定义</span>' : ''}<span class="tag ${voice.maturity}">${maturityText(voice)}</span>${acousticTag(voice)}</div></div><code>${voice.voiceId}</code><p>${voice.description || '声线特征待补充'}</p><small class="acoustic-summary">${acousticSummary(voice)}</small><div class="mini-voice-actions"><button class="mini-icon" title="试听 ${voiceLabel(voice)}" data-play="${voice.voiceId}">${icon('play')}</button><button class="assign-button" data-assign="${voice.voiceId}">${voice.voiceId === role.match ? '已匹配' : '匹配'}</button></div></article>`).join('') : '<p class="manual-empty">请先选择角色性别，查看可手动分配的音色。</p>'}</div></section>
   </div>`;
   $$('#roleDetailPanel [data-assign]').forEach((button) => button.addEventListener('click', () => assignVoice(role.id, button.dataset.assign)));
   $$('#roleDetailPanel [data-play]').forEach((button) => button.addEventListener('click', () => {
     const voice = getVoice(button.dataset.play);
-    if (!voice?.audioUrl) return showToast('该音色未绑定音频文件');
-    const player = new Audio(voice.audioUrl); player.play();
+    playVoice(voice);
   }));
   $('#roleDetailPanel [data-role-gender]')?.addEventListener('change', (event) => {
     role.gender = event.target.value;
@@ -532,7 +727,7 @@ function renderRoleDetail() {
 function renderLibrary() {
   const { gender, maturity, search } = state.filters;
   const list = state.voices.filter((voice) => (gender === 'all' || voice.gender === gender) && (maturity === 'all' || voice.maturity === maturity) && `${voice.voiceName} ${voice.voiceId}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => Number(b.custom) - Number(a.custom));
-  els.voiceGrid.innerHTML = list.length ? list.map((voice) => `<article class="voice-card ${voice.custom ? 'custom-voice-card' : ''}"><div class="voice-card-top"><div class="voice-card-tags">${voice.custom ? '<span class="tag custom">自定义</span>' : ''}<span class="tag ${voice.maturity}">${maturityText(voice)}</span></div><span class="tag gender">${genderText(voice)}</span></div><h3>${voiceLabel(voice)}</h3><code>${voice.voiceId}</code><div class="voice-meta"><span class="tag ${voice.maturity}">${voice.description || '声线待标注'}</span></div><div class="audio-row">${audioButton(voice)}</div><button class="assign-button" data-library-assign="${voice.voiceId}">${icon('plus')}匹配到当前角色</button></article>`).join('') : `<div class="empty-state wide">${icon('search-x')}<strong>没有符合条件的音色</strong><span>切换筛选条件，或先导入资源包。</span></div>`;
+  els.voiceGrid.innerHTML = list.length ? list.map((voice) => `<article class="voice-card ${voice.custom ? 'custom-voice-card' : ''}"><div class="voice-card-top"><div class="voice-card-tags">${voice.custom ? '<span class="tag custom">自定义</span>' : ''}<span class="tag ${voice.maturity}">${maturityText(voice)}</span>${acousticTag(voice)}</div><span class="tag gender">${genderText(voice)}</span></div><h3>${voiceLabel(voice)}</h3><code>${voice.voiceId}</code><div class="voice-meta"><span class="tag ${voice.maturity}">${voice.description || '声线待标注'}</span></div><small class="acoustic-summary">${acousticSummary(voice)}</small><div class="audio-row">${audioButton(voice)}</div><button class="assign-button" data-library-assign="${voice.voiceId}">${icon('plus')}匹配到当前角色</button></article>`).join('') : `<div class="empty-state wide">${icon('search-x')}<strong>没有符合条件的音色</strong><span>切换筛选条件，或先导入资源包。</span></div>`;
   $$('#voiceGrid [data-library-assign]').forEach((button) => button.addEventListener('click', () => { const role = selectedRole(); if (!role) return showToast('请先在角色队列选择角色'); assignVoice(role.id, button.dataset.libraryAssign); }));
   refreshIcons();
 }
@@ -578,6 +773,16 @@ function exportWorkbook() {
 }
 
 function bindEvents() {
+  // Keep native library players and preview buttons mutually exclusive.
+  document.addEventListener('play', (event) => {
+    if (!(event.target instanceof HTMLAudioElement)) return;
+    document.querySelectorAll('audio').forEach((audio) => { if (audio !== event.target) audio.pause(); });
+    if (state.previewAudio && state.previewAudio !== event.target) {
+      state.previewAudio.pause();
+      state.previewAudio.currentTime = 0;
+      state.previewAudio = null;
+    }
+  }, true);
   els.voiceFolderInput.addEventListener('change', importVoiceFolder);
   els.roleFileInput.addEventListener('change', importRoleWorkbook);
   els.customVoiceInput.addEventListener('change', (event) => {
