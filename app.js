@@ -8,6 +8,7 @@ const state = {
   customDraftFiles: [],
   matchConfig: { maturity: 'mature', strategy: 'best' },
   pendingRoleImport: null,
+  previewAudio: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -418,13 +419,22 @@ function effectiveMaturity() {
   if (state.matchConfig.strategy === 'mature' || state.matchConfig.strategy === 'young') return state.matchConfig.strategy;
   return state.matchConfig.maturity;
 }
-function effectiveMaturityLabel() { return effectiveMaturity() === 'young' ? '偏幼态/年轻' : '偏成熟'; }
+function effectiveMaturityLabel() {
+  const maturity = effectiveMaturity();
+  if (maturity === 'young') return '偏幼态/年轻';
+  if (maturity === 'best') return '按人设最佳匹配';
+  return '偏成熟';
+}
+
+function maturityMatchesConfig(voice) {
+  const maturity = effectiveMaturity();
+  return maturity === 'best' || voice.maturity === maturity;
+}
 
 function candidatesFor(role) {
   if (!['female', 'male'].includes(role.gender)) return [];
-  const maturity = effectiveMaturity();
   const candidates = state.voices
-    .filter((voice) => voice.gender === role.gender && voice.maturity === maturity && !voice.custom)
+    .filter((voice) => voice.gender === role.gender && maturityMatchesConfig(voice) && !voice.custom)
     .map((voice) => ({ voiceId: voice.voiceId, score: scoreVoice(role, voice) }))
     .sort((a, b) => b.score - a.score);
   return candidates;
@@ -442,10 +452,10 @@ function autoMatchAll(force = false) {
       role.match = null;
       return;
     }
-    const eligible = state.voices.filter((voice) => voice.gender === role.gender && voice.maturity === effectiveMaturity() && !voice.custom).length;
+    const eligible = state.voices.filter((voice) => voice.gender === role.gender && maturityMatchesConfig(voice) && !voice.custom).length;
     const perVoiceLimit = Math.max(1, Math.ceil((roleCounts[role.gender] || 1) / Math.max(1, eligible)) + 1);
     const existingVoice = getVoice(role.match);
-    if (!force && role.manualOverride && existingVoice?.gender === role.gender && existingVoice?.maturity === effectiveMaturity()) {
+    if (!force && role.manualOverride && existingVoice?.gender === role.gender && maturityMatchesConfig(existingVoice)) {
       usage.set(role.match, (usage.get(role.match) || 0) + 1);
       return;
     }
@@ -489,6 +499,19 @@ function audioButton(voice) {
   return voice?.audioUrl ? `<audio controls preload="none" src="${voice.audioUrl}"></audio>` : `<span class="audio-missing">${icon('volume-x')} 未找到音频文件</span>`;
 }
 
+function playVoice(voice) {
+  if (!voice?.audioUrl) return showToast('该音色未绑定音频文件');
+  if (state.previewAudio) {
+    state.previewAudio.pause();
+    state.previewAudio.currentTime = 0;
+  }
+  state.previewAudio = new Audio(voice.audioUrl);
+  state.previewAudio.addEventListener('ended', () => {
+    if (state.previewAudio?.src === voice.audioUrl) state.previewAudio = null;
+  }, { once: true });
+  state.previewAudio.play().catch(() => showToast('浏览器阻止了自动播放，请再次点击试听'));
+}
+
 function renderRoleDetail() {
   const role = selectedRole();
   if (!role) return;
@@ -511,8 +534,7 @@ function renderRoleDetail() {
   $$('#roleDetailPanel [data-assign]').forEach((button) => button.addEventListener('click', () => assignVoice(role.id, button.dataset.assign)));
   $$('#roleDetailPanel [data-play]').forEach((button) => button.addEventListener('click', () => {
     const voice = getVoice(button.dataset.play);
-    if (!voice?.audioUrl) return showToast('该音色未绑定音频文件');
-    const player = new Audio(voice.audioUrl); player.play();
+    playVoice(voice);
   }));
   $('#roleDetailPanel [data-role-gender]')?.addEventListener('change', (event) => {
     role.gender = event.target.value;
@@ -578,6 +600,16 @@ function exportWorkbook() {
 }
 
 function bindEvents() {
+  // Keep native library players and preview buttons mutually exclusive.
+  document.addEventListener('play', (event) => {
+    if (!(event.target instanceof HTMLAudioElement)) return;
+    document.querySelectorAll('audio').forEach((audio) => { if (audio !== event.target) audio.pause(); });
+    if (state.previewAudio && state.previewAudio !== event.target) {
+      state.previewAudio.pause();
+      state.previewAudio.currentTime = 0;
+      state.previewAudio = null;
+    }
+  }, true);
   els.voiceFolderInput.addEventListener('change', importVoiceFolder);
   els.roleFileInput.addEventListener('change', importRoleWorkbook);
   els.customVoiceInput.addEventListener('change', (event) => {
